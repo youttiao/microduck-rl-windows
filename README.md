@@ -49,10 +49,45 @@ cd microduck-rl-workspace
 | 文档 | 内容 |
 |---|---|
 | **[`docs/工具链总览.md`](docs/工具链总览.md)** | **先读这个。** 从机器人本体 → Rust 运行时 → ONNX 契约 → 训练栈 → 仿真层 → 资产分发，一层层讲清楚这套东西怎么串起来的 |
+| **[`docs/人体动作迁移.md`](docs/人体动作迁移.md)** | **把人体动作库迁到鸭子**：上游已有的（未合并的）动作跟踪环境、人体→鸭子的重定向器、动作库选型的许可问题、"一个动作一个策略再堆起来"怎么做 |
 | [`docs/Windows训练环境.md`](docs/Windows训练环境.md) | Windows 上的 5 个坑、原理、修复，以及哪些功能确实不可用 |
 | [`docs/训练避坑清单.md`](docs/训练避坑清单.md) | 从上游 `AGENTS.md` 提炼的中文避坑清单（奖励函数符号约定、curriculum、warm-start…）**改奖励函数前必读** |
 | [`docs/社区资源调研.md`](docs/社区资源调研.md) | **688 个 microduck 仓库**的分类调研：可下载的社区策略、其它仿真器移植、硬件复刻、ROS/导航集成 |
 | [`docs/community-policies.json`](docs/community-policies.json) | 45 条社区策略的机器可读清单（18 个 GitHub 源码仓 + 27 个 HF 可部署策略） |
+
+---
+
+## 🤖 人体动作 → 鸭子的动作策略
+
+上游有两个**未合并**的分支带着完整的动作跟踪环境（`expressive-motions` / `dance-steps`，2026-10-30），但**没有任何人体动作库的导入器** —— 那正是缺的那块。本仓库补上了：
+
+```
+tools/
+├── retarget_human.py        人体 3D 关节位置 → 上游的 "Tremendous" 参考通道 CSV
+├── duck_head_ik.py          头部姿态 → 4 个颈部关节角（对着真 MJCF 数值求解，不是手推公式）
+├── make_motion_library.py   批量：目录 → 一堆 CSV + 自动注册成新任务
+└── test_retarget.py         地面真值测试（不需要任何数据集）
+```
+
+```powershell
+# 1) 重定向 + 注册（一个动作 = 一个新任务）
+uv run python tools/make_motion_library.py --src motions/ `
+    --out <repo>\src\mjlab_microduck\tasks\motion_data --register
+
+# 2) 训练（每个动作一个任务）
+uv run train Mjlab-Expressive-MyMotion-MicroDuck --env.scene.num-envs 4096
+
+# 3) 导出 ONNX，4) 装到机器人
+uv run scripts/export.py Mjlab-Expressive-MyMotion-MicroDuck --checkpoint-file <model.pt>
+sudo robotctl policy add my-motion <user>/microduck-my-motion
+```
+
+**已经在本机端到端验证**：人体动作 → 重定向 → 注册 → 新任务出现 → 训练退出码 0。重定向精度：躯干通道 ≤0.11°、头部姿态 0.001°、高度 0.016 mm（地面真值测试）。
+
+**关键设计**：相位 φ 走指令通道 `[cos 2πφ, sin 2πφ, 0]`，**策略不负责计时**（上游的教训：让策略自己数拍子，十次全挂）。所以 61 维观测契约不变，训出来的策略照样能和走路/站立策略热切换。
+
+**动作库选型有许可坑**：AMASS 系（HumanML3D / BABEL / Motion-X）是**非商用且禁止再分发**的，重定向之后公开分享仍然受限。要能公开分享就用 **OpenCap（CC BY 4.0）**、**CMU Mocap（免费无限制）**，或者文本生成动作。详见 [`docs/人体动作迁移.md`](docs/人体动作迁移.md) 第五节。
+
 
 ---
 
@@ -147,6 +182,7 @@ microduck-rl-workspace/
 ├── README.md                    # 你正在读的
 ├── docs/
 │   ├── 工具链总览.md             # 从本体到训练脚本的完整拆解
+│   ├── 人体动作迁移.md           # 人体动作库 → 鸭子：重定向器 + 动作库 + 堆起来
 │   ├── Windows训练环境.md        # Windows 上的坑与修法
 │   ├── 训练避坑清单.md           # 上游 AGENTS.md 的中文提炼
 │   ├── 社区资源调研.md           # 688 个仓库的分类调研
@@ -157,6 +193,11 @@ microduck-rl-workspace/
 │   ├── challenges.ps1           # 竞技场挑战环境封装
 │   ├── check_env.py             # 环境自检
 │   └── fetch_hf_assets.ps1      # 拉官方策略和训练包
+├── tools/                       # 人体动作 → 鸭子的重定向
+│   ├── retarget_human.py
+│   ├── duck_head_ik.py
+│   ├── make_motion_library.py
+│   └── test_retarget.py
 ├── scripts/
 │   └── bootstrap.ps1            # 一键搭建
 └── patches/
