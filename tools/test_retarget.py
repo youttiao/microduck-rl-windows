@@ -113,7 +113,7 @@ def main() -> int:
     frames, truth, fps = build_motion()
     names = list(ORDER)
 
-    t, vals, info, q_head = retarget(frames, names, fps, ik)
+    t, vals, info, q_head, _steps = retarget(frames, names, fps, ik)
     got = {c: vals[:, i] for i, c in enumerate(REF_CHANNELS)}
 
     # The truth is sampled at the source rate; the retargeted channels are at

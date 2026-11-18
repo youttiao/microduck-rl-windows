@@ -66,13 +66,23 @@ tools/
 ├── retarget_human.py        人体 3D 关节位置 → 上游的 "Tremendous" 参考通道 CSV
 ├── duck_head_ik.py          头部姿态 → 4 个颈部关节角（对着真 MJCF 数值求解，不是手推公式）
 ├── make_motion_library.py   批量：目录 → 一堆 CSV + 自动注册成新任务
-└── test_retarget.py         地面真值测试（不需要任何数据集）
+├── soma_to_motionlib.py     NVIDIA SOMA 的 CSV → 同一格式（根旋转读法自动标定）
+├── bvh.py                   BVH 解析（CMU Mocap 的格式）：层级 + 正向运动学
+├── test_retarget.py         地面真值测试：躯干/头/高度三个通道
+├── test_retarget_full.py    全身测试：接触表交替、单步位移、弗劳德时间缩放
+└── test_bvh.py              BVH 正向运动学逐值测试
 ```
 
 ```powershell
 # 1) 重定向 + 注册（一个动作 = 一个新任务）
 uv run python tools/make_motion_library.py --src motions/ `
     --out <repo>\src\mjlab_microduck\tasks\motion_data --register
+
+# 1b) 全身带脚步的版本（加 --full-body，注册成 StepMotion）
+uv run python tools/make_motion_library.py --src motions/ --full-body --register
+
+# 1c) 从 NVIDIA SOMA 的输出转过来
+uv run python tools/soma_to_motionlib.py --csv soma.csv --out out.csv --full-body
 
 # 2) 训练（每个动作一个任务）
 uv run train Mjlab-Expressive-MyMotion-MicroDuck --env.scene.num-envs 4096
@@ -82,7 +92,11 @@ uv run scripts/export.py Mjlab-Expressive-MyMotion-MicroDuck --checkpoint-file <
 sudo robotctl policy add my-motion <user>/microduck-my-motion
 ```
 
-**已经在本机端到端验证**：人体动作 → 重定向 → 注册 → 新任务出现 → 训练退出码 0。重定向精度：躯干通道 ≤0.11°、头部姿态 0.001°、高度 0.016 mm（地面真值测试）。
+**已经在本机端到端验证**（两条路都通了）：
+- **A 自建重定向**：人体动作 → 重定向 → 注册 → `DemoSway` / `DemoWalk` 出现 → 训练退出码 0 → 导出 ONNX，**图结构与官方策略逐节点一致**
+- **B NVIDIA SOMA**：SOMA CSV → 重定向 → 注册 → `SomaWalkForward` 出现 → 训练退出码 0，四个 step 项符号全对
+
+重定向精度：躯干通道 ≤0.11°、头部姿态 0.001°、高度 0.016 mm（地面真值测试）。
 
 **关键设计**：相位 φ 走指令通道 `[cos 2πφ, sin 2πφ, 0]`，**策略不负责计时**（上游的教训：让策略自己数拍子，十次全挂）。所以 61 维观测契约不变，训出来的策略照样能和走路/站立策略热切换。
 

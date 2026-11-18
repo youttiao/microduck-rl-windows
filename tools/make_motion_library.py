@@ -91,6 +91,12 @@ def main(argv=None) -> int:
     ap.add_argument("--height-scale", type=float, default=None)
     ap.add_argument("--smooth-s", type=float, default=0.08)
     ap.add_argument("--tail-frac", type=float, default=0.12)
+    ap.add_argument("--full-body", action="store_true",
+                    help="also produce the 12 step channels (foot targets, contact "
+                         "schedule, root displacement) and register as a StepMotion")
+    ap.add_argument("--length-scale", type=float, default=None)
+    ap.add_argument("--time-scale", type=float, default=None)
+    ap.add_argument("--contact-height", type=float, default=0.03)
     ap.add_argument("--register", action="store_true",
                     help="also add the DataMotion entries to expressive_motions.py")
     ap.add_argument("--dry-run", action="store_true")
@@ -105,15 +111,22 @@ def main(argv=None) -> int:
     kw = {}
     if args.height_scale is not None:
         kw["height_scale"] = args.height_scale
+    if args.length_scale is not None:
+        kw["length_scale"] = args.length_scale
+    if args.time_scale is not None:
+        kw["time_scale"] = args.time_scale
 
     entries = []
     for src in sources:
         name = motion_name(src)
         try:
             joints, fps, names = load_joints(src)
-            t, vals, info, _q = retarget(joints, names, fps, ik,
-                                         smooth_s=args.smooth_s,
-                                         tail_frac=args.tail_frac, **kw)
+            t, vals, info, _q, steps = retarget(joints, names, fps, ik,
+                                               smooth_s=args.smooth_s,
+                                               tail_frac=args.tail_frac,
+                                               full_body=args.full_body,
+                                               contact_height=args.contact_height,
+                                               **kw)
         except Exception as exc:  # noqa: BLE001
             print(f"  SKIP {name}: {exc}", file=sys.stderr)
             continue
@@ -121,21 +134,36 @@ def main(argv=None) -> int:
         csv_name = f"{slug(name)}.csv"
         csv_path = Path(args.out) / csv_name
         if not args.dry_run:
-            write_csv(csv_path, t, vals, name, info)
+            write_csv(csv_path, t, vals, name, info, steps)
 
         res = info["head_ik_residual_deg"]
         flag = "" if res["frames_over_5deg"] == 0 else "  <-- head unreachable in some frames"
+        extra = ""
+        if args.full_body:
+            s = info.get("steps", {})
+            extra = (f"  len x{s.get('length_scale')}  time x{s.get('time_scale')}"
+                     f"  step {s.get('duck_total_foot_travel_m')}m total"
+                     f"  clear {s.get('duck_max_clearance_mm')}mm"
+                     f"  planted l{s.get('left_planted_frac')} r{s.get('right_planted_frac')}")
         print(f"  {name:24s} {info['duration_s']:6.2f}s  {info['frames_out']:4d} frames  "
-              f"head err {res['mean']:.3f}/{res['max']:.2f} deg{flag}")
+              f"head err {res['mean']:.3f}/{res['max']:.2f} deg{flag}{extra}")
         entries.append((task_name(name), csv_name, info))
 
     print()
-    print("--- paste into src/mjlab_microduck/tasks/expressive_motions.py ---")
-    print("from .expressive_motions import DATA_MOTIONS as _EXPRESSIVE_DATA_MOTIONS")
-    print()
-    for name, csv_name, info in entries:
-        print(f'    "{name}": DataMotion("{name}", {info["duration_s"]:.2f}, "{csv_name}", '
-              f'note="retargeted from human motion"),')
+    if args.full_body:
+        print("--- paste into src/mjlab_microduck/tasks/expressive_motions.py ---")
+        print("from .expressive_motions import STEP_MOTIONS as _EXPRESSIVE_STEP_MOTIONS")
+        print()
+        for name, csv_name, info in entries:
+            print(f'    "{name}": StepMotion("{name}", {info["duration_s"]:.2f}, "{csv_name}", '
+                  f'note="retargeted from human motion"),')
+    else:
+        print("--- paste into src/mjlab_microduck/tasks/expressive_motions.py ---")
+        print("from .expressive_motions import DATA_MOTIONS as _EXPRESSIVE_DATA_MOTIONS")
+        print()
+        for name, csv_name, info in entries:
+            print(f'    "{name}": DataMotion("{name}", {info["duration_s"]:.2f}, "{csv_name}", '
+                  f'note="retargeted from human motion"),')
     print()
     print("--- the tasks this creates ---")
     for name, _csv, _info in entries:
@@ -148,17 +176,23 @@ def main(argv=None) -> int:
             print(f"cannot find {target} to patch; run from the repo root", file=sys.stderr)
             return 1
         src_text = target.read_text(encoding="utf-8")
-        if "DATA_MOTIONS = {" not in src_text:
-            print("cannot find DATA_MOTIONS in expressive_motions.py", file=sys.stderr)
+        # A motion with step channels has to be a StepMotion (the env reads
+        # the contact schedule and the foot targets from those columns);
+        # one without is a plain DataMotion.
+        dict_name = "STEP_MOTIONS" if args.full_body else "DATA_MOTIONS"
+        cls = "StepMotion" if args.full_body else "DataMotion"
+        anchor = f"{dict_name} = {{\n"
+        if anchor not in src_text:
+            print(f"cannot find {dict_name} in expressive_motions.py", file=sys.stderr)
             return 1
         block = "".join(
-            f'    "{name}": DataMotion("{name}", {info["duration_s"]:.2f}, "{csv_name}", '
+            f'    "{name}": {cls}("{name}", {info["duration_s"]:.2f}, "{csv_name}", '
             f'note="retargeted from human motion"),\n'
             for name, csv_name, info in entries
         )
-        src_text = src_text.replace("DATA_MOTIONS = {\n", "DATA_MOTIONS = {\n" + block, 1)
+        src_text = src_text.replace(anchor, anchor + block, 1)
         target.write_text(src_text, encoding="utf-8")
-        print(f"registered {len(entries)} motion(s) in {target}")
+        print(f"registered {len(entries)} motion(s) as {cls} in {dict_name} of {target}")
         print("now run:  uv run list-envs   to see the new tasks")
     return 0
 
