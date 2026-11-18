@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 训练产物和本地资产 (很大, 不要提交)
+logs/
+runs/
+media/
+data/hf/
+*.onnx
+*.pt
+*.mp4
+*.webm
+
+# 本地环境
+.env
+.env.*
