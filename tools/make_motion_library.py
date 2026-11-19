@@ -117,6 +117,7 @@ def main(argv=None) -> int:
         kw["time_scale"] = args.time_scale
 
     entries = []
+    skipped = []
     for src in sources:
         name = motion_name(src)
         try:
@@ -129,6 +130,7 @@ def main(argv=None) -> int:
                                                **kw)
         except Exception as exc:  # noqa: BLE001
             print(f"  SKIP {name}: {exc}", file=sys.stderr)
+            skipped.append(name)
             continue
 
         csv_name = f"{slug(name)}.csv"
@@ -165,6 +167,10 @@ def main(argv=None) -> int:
             print(f'    "{name}": DataMotion("{name}", {info["duration_s"]:.2f}, "{csv_name}", '
                   f'note="retargeted from human motion"),')
     print()
+    if skipped:
+        print(f"ERROR: {len(skipped)} motion(s) were SKIPPED and not written: "
+              f"{', '.join(skipped)}", file=sys.stderr)
+        return 1
     print("--- the tasks this creates ---")
     for name, _csv, _info in entries:
         print(f"    uv run train Mjlab-Expressive-{name}-MicroDuck --env.scene.num-envs 4096")

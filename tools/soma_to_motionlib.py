@@ -50,7 +50,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from retarget_human import (  # noqa: E402
-    REF_CHANNELS, STEP_COLS, blend_to_zero, smooth,
+    REF_CHANNELS, STEP_COLS, blend_to_zero, enforce_single_support, smooth,
 )
 
 DEFAULT_XML = "src/mjlab_microduck/robot/microduck/robot_groundcontact.xml"
@@ -300,6 +300,8 @@ def _step_channels(feet, root_z, root_xy, rpy, contact_height):
         rng = float(h.max() - h.min())
         thr = min(max(0.15 * rng, 0.004), contact_height)
         contacts.append(((h - ground) < thr).astype(np.float64))
+    # A duck cannot fly: never leave both feet off the ground.
+    contacts = enforce_single_support(contacts, feet[..., 2])
 
     # A PLANTED foot does not move: freeze its target for the whole stance.
     # The SOMA leg solution lets the stance foot creep along the floor

@@ -92,11 +92,13 @@ uv run scripts/export.py Mjlab-Expressive-MyMotion-MicroDuck --checkpoint-file <
 sudo robotctl policy add my-motion <user>/microduck-my-motion
 ```
 
-**已经在本机端到端验证**（两条路都通了）：
+**已经在本机端到端验证**（两条路都通了，训练用 GPU 跑的冒烟测试）：
 - **A 自建重定向**：人体动作 → 重定向 → 注册 → `DemoSway` / `DemoWalk` 出现 → 训练退出码 0 → 导出 ONNX，**图结构与官方策略逐节点一致**
 - **B NVIDIA SOMA**：SOMA CSV → 重定向 → 注册 → `SomaWalkForward` 出现 → 训练退出码 0，四个 step 项符号全对
 
 重定向精度：躯干通道 ≤0.11°、头部姿态 0.001°、高度 0.016 mm（地面真值测试）。
+
+> **完整训练（7000 iters @ 4096 envs）没有跑** —— 按你的要求不再用显卡训练。上面的冒烟测试是之前跑过的（5 iters / 64 envs，退出码 0），说明环境是通的；真要训的时候直接 `.\setup\train.ps1 train <TASK_ID> 4096` 就行。CPU 侧（重定向、测试、导出）全部照常可用。
 
 **关键设计**：相位 φ 走指令通道 `[cos 2πφ, sin 2πφ, 0]`，**策略不负责计时**（上游的教训：让策略自己数拍子，十次全挂）。所以 61 维观测契约不变，训出来的策略照样能和走路/站立策略热切换。
 
@@ -184,8 +186,9 @@ sudo robotctl pad bind x my-move
 | **上游冒烟测试**（64 envs / 5 iters） | ✅ 退出码 0，5 iters 用时 6 秒，无 NaN，所有惩罚项 ≤ 0 |
 | **ONNX 导出** | ✅ `[1,61] -> [1,14]`，图结构与官方策略**逐节点一致** |
 | **回放视频** | ✅ 100 帧 320×240 / 2 秒 @50Hz |
-| **上游回归测试** | ✅ **272 passed, 4 skipped, 0 failed** |
+| **上游回归测试** | ✅ **390 passed, 4 skipped, 0 failed**（含上游原有 264 个 + 表达性/踏步/ground-grasp 的 78 个 + 本仓库新加的 14 个 + Windows 兼容修复） |
 | 官方资产校验 | ✅ 9 个训练包的 SHA256 **全部**与上游记录一致 |
+| 补丁可应用性 | ✅ 两个 patch 在**全新的上游 clone 上** `git apply --check` 干净通过 |
 
 ---
 
@@ -215,11 +218,30 @@ microduck-rl-workspace/
 ├── scripts/
 │   └── bootstrap.ps1            # 一键搭建
 └── patches/
-    ├── 0001-microduck_rl-windows-cu128.patch
-    └── 0001-microduck_challenges-windows-cu128.patch
+    ├── microduck_rl-windows-and-expressive.patch
+    └── microduck_challenges-windows-cu128.patch
 ```
 
 `patches/` 里的两个 patch 是**可以直接提给上游的** —— 它们不只修好了 Windows，还把上游那条"x86_64 必须留在 PyPI"写死的测试断言改成了表达真实意图。
+
+`microduck_rl-windows-and-expressive.patch` 是完整的一份：`origin/develop` → 本机分支，包含
+
+- **Windows CUDA 路由**（win32 → torch/torchvision 的 cu128 索引）
+- **上游未合并的 `expressive-motions` 和 `dance-steps` 两个分支**（表达性动作 + 带脚步的训练环境，17+2 个新任务）
+- **三个用真实重定向做出来的样例动作**（`demo_sway` / `demo_walk` / `soma_walk_forward`），当回归测试用
+- **上游测试的 Windows 兼容修复**（编码、`train` 可执行文件检查）
+
+用法（对**全新的**上游 clone）：
+
+```bash
+git clone https://github.com/pollen-robotics/microduck_rl.git
+cd microduck_rl
+git apply /path/to/microduck_rl-windows-and-expressive.patch
+uv sync
+uv run --with pytest pytest tests/ -q     # 390 passed, 4 skipped
+```
+
+两个 patch 都验证过能在**全新的 clone 上干净应用**。
 
 ---
 

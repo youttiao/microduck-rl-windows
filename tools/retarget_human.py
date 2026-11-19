@@ -273,16 +273,62 @@ def smooth(x: np.ndarray, fps: float, window_s: float = 0.08) -> np.ndarray:
     return out
 
 
-def blend_to_zero(x: np.ndarray, tail_frac: float = 0.12) -> np.ndarray:
-    """Fade the last `tail_frac` of the motion linearly back to zero.
+def enforce_single_support(contacts, foot_z):
+    """A duck with both feet in the air falls over.
 
-    The env wants every reference channel back at 0 before phi = 1, so the
-    duck ends standing.
+    Where the schedule would leave both feet swinging, keep the LOWER one
+    planted. Real gaits have a short flight phase, but the duck has no
+    ability to absorb it, and the env's "unscheduled lift" cost punishes a
+    foot that leaves the ground when it was told to stay.
+
+    `foot_z` is (N, 2): the height of each foot over time.
+    """
+    out = [np.array(c, dtype=np.float64) for c in contacts]
+    both = (out[0] < 0.5) & (out[1] < 0.5)
+    if both.any():
+        lower_is_left = foot_z[:, 0] <= foot_z[:, 1]
+        for i in np.where(both)[0]:
+            out[0 if lower_is_left[i] else 1][i] = 1.0
+    return out
+
+
+def blend_to_zero(x: np.ndarray, tail_frac: float = 0.12,
+                 ramp_frac: float = 0.08, hold_frac: float = 0.05) -> np.ndarray:
+    """Ease the motion in and out with a raised-cosine window, holding still
+    at both ends.
+
+    The env wants every reference channel to read 0 at phi = 0 AND to be
+    back at 0 before phi = 1, with the RATE at zero at both ends -- a
+    linear fade has a slope discontinuity at its joints, so the motion would
+    jerk when the episode starts and when the duck is handed back. A
+    raised cosine has zero slope at its endpoints, which is what upstream's
+    own envelope (expressive_motions._E) does.
+
+    The `hold_frac` holds matter because the reference's rate is a FINITE
+    difference of the stored values: a channel that merely starts at zero
+    still has a non-zero first rate. Holding it at zero for a few frames
+    makes the rate exactly zero there, the way the shipped motions do.
     """
     n = x.shape[0]
-    k = max(2, int(n * (1.0 - tail_frac)))
+    if n < 8:
+        return x
+    T = n - 1
     w = np.ones(n)
-    w[k:] = np.linspace(1.0, 0.0, n - k)
+    hold = int(hold_frac * T)
+    up = int(ramp_frac * T)
+    if hold > 0:
+        w[: hold + 1] = 0.0
+    if up > 0:
+        i = np.arange(up + 1)
+        seg = slice(hold + 1, min(hold + up + 1, n))
+        w[seg] = 0.5 - 0.5 * np.cos(np.pi * i[: seg.stop - seg.start] / up)
+    dn = int(ramp_frac * T)
+    if dn > 0:
+        i = np.arange(dn + 1)
+        seg = slice(max(0, T - dn - hold), max(0, T - dn - hold) + dn + 1)
+        w[seg] = 0.5 + 0.5 * np.cos(np.pi * i[: seg.stop - seg.start] / dn)
+    if hold > 0:
+        w[max(0, T - hold):] = 0.0
     return x * w[:, None]
 
 
@@ -343,8 +389,9 @@ def retarget(joints: np.ndarray, names: list[str] | None, fps: float,
     # --- full body: the 12 step channels, at the source rate ---------------
     steps = None
     step_info = {}
+    steps_t = None
     if full_body:
-        _t_steps, steps, step_info = retarget_full_body(
+        steps_t, steps, step_info = retarget_full_body(
             joints, names, fps, float(y0),
             length_scale=length_scale,
             time_scale=time_scale,
@@ -352,7 +399,10 @@ def retarget(joints: np.ndarray, names: list[str] | None, fps: float,
         )
         # A single time axis for the whole CSV: the step channels and the
         # trunk channels must share it, so the motion is re-timed (slowed) for
-        # both when time_scale > 1.
+        # both when time_scale > 1. `steps_t` is the step channels' OWN time
+        # base (already scaled); the trunk channels use the scaled t_in.
+        # The EFFECTIVE time scale is the one the step computation chose --
+        # it derives it from the length scale when the caller did not pass one.
         time_scale = step_info["time_scale"]
         if time_scale != 1.0:
             t_in = t_in * time_scale
@@ -368,18 +418,19 @@ def retarget(joints: np.ndarray, names: list[str] | None, fps: float,
     vals = blend_to_zero(vals, tail_frac)
 
     if steps is not None:
-        # Resample once. The contact columns are a hard 0/1, so they take the
-        # NEAREST sample -- interpolating between "planted" and "swing" would
-        # smear the transition and blur the schedule.
+        # Resample once, against the step channels' own time base. The contact
+        # columns are a hard 0/1, so they take the NEAREST sample --
+        # interpolating between "planted" and "swing" would smear the
+        # transition and blur the schedule.
         t_out = np.arange(t_in[0], t_in[-1] + 1e-9, 1.0 / 50.0)
         out_steps = np.empty((len(t_out), steps.shape[1]))
         for c in range(steps.shape[1]):
             name = STEP_COLS[c]
             if name in ("l_contact", "r_contact"):
-                j = np.clip(np.searchsorted(t_in, t_out, side="left"), 0, len(t_in) - 1)
+                j = np.clip(np.searchsorted(steps_t, t_out, side="left"), 0, len(steps_t) - 1)
                 out_steps[:, c] = steps[j, c]
             else:
-                out_steps[:, c] = np.interp(t_out, t_in, steps[:, c])
+                out_steps[:, c] = np.interp(t_out, steps_t, steps[:, c])
         steps = out_steps
         # A planted foot is on the ground, so its target clearance is 0. This
         # has to happen AFTER the resample: the clearance is interpolated while
@@ -488,6 +539,9 @@ def retarget_full_body(joints: np.ndarray, names: list[str] | None, fps: float,
 
     l_contact = contact_of(lf)
     r_contact = contact_of(rf)
+    # A duck cannot fly: never leave both feet off the ground.
+    l_contact, r_contact = enforce_single_support(
+        [l_contact, r_contact], np.stack([lf[:, 2], rf[:, 2]], axis=1))
 
     # --- horizontal displacements in the start heading frame -----------------
     c, s = math.cos(-yaw0), math.sin(-yaw0)
